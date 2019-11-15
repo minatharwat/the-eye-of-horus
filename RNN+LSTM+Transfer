@@ -1,0 +1,205 @@
+import glob
+import numpy as np
+import os
+import shutil
+import glob
+import numpy as np
+import matplotlib.pyplot as plt
+from keras.preprocessing.image import ImageDataGenerator, load_img, img_to_array, array_to_img
+from sklearn import metrics
+from keras import metrics
+from keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout, InputLayer,Activation,LSTM,AveragePooling1D
+from keras.models import Sequential
+from keras import optimizers
+from keras.applications import vgg16
+from keras.models import Model
+import keras
+from sklearn.preprocessing import LabelEncoder
+
+
+np.random.seed(42)
+train_labels=[]
+validation_labels=[]
+
+
+IMG_DIM = (150, 150)
+
+train_files_normal = glob.glob('../input/dataset-bags/normal/*')
+train_files_suspicious=glob.glob('../input/dataset-bags/suspicious/*')
+train_imgs = [img_to_array(load_img(img, target_size=IMG_DIM)) for img in train_files_normal]
+for i in train_files_suspicious:
+  train_imgs.append(img_to_array(load_img(i, target_size=IMG_DIM)))
+train_imgs = np.array(train_imgs)
+for j in train_files_normal:
+    train_labels.append(0)
+for jj in train_files_suspicious:
+    train_labels.append(1)
+#train_labels = [fn.split('\\')[1].split('.')[0].strip() for fn in train_files]
+print("test1")
+
+validation_files_normal = glob.glob('../input/dataset-bags/normal_test/*')
+validation_files_suspicious=glob.glob('../input/dataset-bags/suspicious_test/*')
+validation_imgs = [img_to_array(load_img(img, target_size=IMG_DIM)) for img in validation_files_normal]
+for i in validation_files_suspicious:
+    validation_imgs.append(img_to_array(load_img(i, target_size=IMG_DIM)))
+
+validation_imgs = np.array(validation_imgs)
+for j in validation_files_normal:
+    validation_labels.append(0)
+for jj in validation_files_suspicious:
+    validation_labels.append(1)
+#validation_labels = [fn.split('\\')[1].split('.')[0].strip() for fn in validation_files]
+
+print('Train dataset shape:', train_imgs.shape,
+      '\tValidation dataset shape:', validation_imgs.shape)
+
+train_imgs_scaled = train_imgs.astype('float32')
+validation_imgs_scaled  = validation_imgs.astype('float32')
+train_imgs_scaled /= 255
+validation_imgs_scaled /= 255
+
+print(train_imgs[0].shape)
+array_to_img(train_imgs[0])
+
+
+
+batch_size = 100
+num_classes = 2
+epochs =10
+input_shape = (150, 150, 3)
+
+# encode text category labels
+
+
+le = LabelEncoder()
+le.fit(train_labels)
+train_labels_enc = le.transform(train_labels)
+validation_labels_enc = le.transform(validation_labels)
+
+
+
+
+vgg = vgg16.VGG16(include_top=False, weights='imagenet',
+                  input_shape=input_shape)
+
+output = vgg.layers[-1].output
+output = keras.layers.Flatten()(output)
+vgg_model = Model(vgg.input, output)
+
+vgg_model.trainable = False
+for layer in vgg_model.layers:
+    layer.trainable = False
+
+
+
+def get_bottleneck_features(model, input_imgs):
+    features = model.predict(input_imgs, verbose=0)
+    return features
+
+
+train_features_vgg = get_bottleneck_features(vgg_model, train_imgs_scaled)
+validation_features_vgg = get_bottleneck_features(vgg_model, validation_imgs_scaled)
+
+print('Train Bottleneck Features:', train_features_vgg.shape,
+      '\tValidation Bottleneck Features:', validation_features_vgg.shape)
+
+#--concatenate
+frames_num=15
+count=0
+joint_transfer=[]
+for i in range(int(len(train_features_vgg)/frames_num)):
+    inc=count+frames_num
+    joint_transfer.append([train_features_vgg[count:inc],train_labels_enc[count]])
+    count=inc
+cc=0
+joint_transfer_valid=[]
+for i in range(int(len(validation_features_vgg)/frames_num)):
+    inc=cc+frames_num
+    joint_transfer_valid.append([validation_features_vgg[cc:inc],validation_labels_enc[cc]])
+    cc=inc
+
+data=[]
+target=[]
+data_validation=[]
+target_validation=[]
+for i in joint_transfer:
+    data.append(i[0])
+    target.append(i[1])
+data=np.array([data])
+#target=np.array([target])
+print("data",data.shape)
+data = data.reshape(data.shape[0]* data.shape[2],data.shape[1],data.shape[3])
+print("data",data.shape)
+data = np.reshape(data, (data.shape[1],data.shape[0], data.shape[2]))
+#data= data.reshape(data, (data.shape[1], data.shape[2]))
+#target = np.reshape(target, (target.shape[0]* 1, target.shape[1]))
+
+from keras.utils import to_categorical
+train_laargetbels = to_categorical(target)
+
+
+for i in joint_transfer_valid:
+    data_validation.append(i[0])
+    target_validation.append(i[1])
+    
+data_validation=np.array([data_validation])
+#target=np.array([target])
+print("data",data_validation.shape)
+data_validation= data_validation.reshape(data_validation.shape[0]* data_validation.shape[2],data_validation.shape[1],data_validation.shape[3])
+print("data",data_validation.shape)
+data_validation = np.reshape(data_validation, (data_validation.shape[1],data_validation.shape[0], data_validation.shape[2]))
+
+from keras.utils import to_categorical
+valid_laargetbels = to_categorical(target_validation)
+
+chunk_size=8192
+chunks=15
+rnn_size=512
+input_shape = vgg_model.output_shape[1]
+
+model = Sequential()
+
+model.add(LSTM(rnn_size,input_shape=(chunks,chunk_size)))
+model.add(Dense(1024))
+model.add(Activation('relu'))
+model.add(Dense(50))
+model.add(Activation('sigmoid'))
+
+#model.add(Flatten())
+model.add(Dense(2, activation='softmax'))
+
+model.compile(loss='categorical_crossentropy',
+              optimizer=optimizers.adam(lr=1e-4),
+              metrics=['accuracy'])
+
+model.summary()
+
+history = model.fit(x=data, y=train_laargetbels,
+                    validation_data=(data_validation, valid_laargetbels),
+                    batch_size=batch_size,
+                    epochs=epochs,
+                    verbose=1)
+model.save("rnn11Lstm.h5",overwrite=False)
+#print(model.evaluate(validation_features_vgg,validation_labels_enc))
+
+f, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+t = f.suptitle('Basic CNN Performance', fontsize=12)
+f.subplots_adjust(top=0.85, wspace=0.3)
+
+epoch_list = list(range(1,11))
+ax1.plot(epoch_list, history.history['acc'], label='Train Accuracy')
+ax1.plot(epoch_list, history.history['val_acc'], label='Validation Accuracy')
+ax1.set_xticks(np.arange(0, 11, 5))
+ax1.set_ylabel('Accuracy Value')
+ax1.set_xlabel('Epoch')
+ax1.set_title('Accuracy')
+l1 = ax1.legend(loc="best")
+
+ax2.plot(epoch_list, history.history['loss'], label='Train Loss')
+ax2.plot(epoch_list, history.history['val_loss'], label='Validation Loss')
+ax2.set_xticks(np.arange(0, 11, 5))
+ax2.set_ylabel('Loss Value')
+ax2.set_xlabel('Epoch')
+ax2.set_title('Loss')
+l2 = ax2.legend(loc="best")
+plt.show()
